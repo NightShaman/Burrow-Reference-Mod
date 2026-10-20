@@ -6,12 +6,20 @@ It demonstrates a validated manifest, `activate(context)` and cleanup, JSON rout
 
 ## Install
 
+The currently published development source is:
+
+```text
+https://github.com/NightShaman/Burrow-Reference-Mod.git
+```
+
 1. Open **Settings → Mods → Mod sources**.
-2. Add `https://github.com/GoblinKing-Burrow/Burrow-Reference-Mod.git` for public releases, or `https://github.com/NightShaman/Burrow-Reference-Mod.git` for development builds.
+2. Add the repository URL above.
 3. Refresh, install a tagged version, then explicitly enable it.
 4. Grant `reference_greet` through ordinary per-agent MCP grants before expecting an agent to call it.
 
 Installation does not grant tools and mod code is not sandboxed. Install only code you trust.
+
+The release workflow publishes UTC calendar-version tags. A GoblinKing-Burrow public-release mirror can be added later through the normal coordinated promotion process; do not assume that mirror exists until it is published.
 
 ## Verify
 
