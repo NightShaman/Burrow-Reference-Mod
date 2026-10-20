@@ -19,7 +19,7 @@ jobs:
       - name: Standalone contract gate
         run: |
           npm run build
-          node --test test/server.test.mjs
+          node --test test/server.test.mjs test/ui.test.mjs
       - name: Assign calendar version
         id: version
         run: |
@@ -28,6 +28,8 @@ jobs:
           while git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null 2>&1; do suffix=$((suffix + 1)); version="$base.$suffix"; done
           node scripts/set-release-version.mjs "$version"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Verify package identity
+        run: node scripts/set-release-version.mjs "${{ steps.version.outputs.version }}" --check
       - name: Publish development package
         env: { GH_TOKEN: "${{ github.token }}", VERSION: "${{ steps.version.outputs.version }}" }
         run: |
