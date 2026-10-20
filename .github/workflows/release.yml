@@ -1,0 +1,42 @@
+name: Release Burrow Reference Mod development package
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: burrow-reference-mod-development-release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main, fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: Standalone contract gate
+        run: |
+          npm run build
+          node --test test/server.test.mjs
+      - name: Assign calendar version
+        id: version
+        run: |
+          set -eu
+          base=$(date -u +%Y.%m.%d); version=$base; suffix=0
+          while git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null 2>&1; do suffix=$((suffix + 1)); version="$base.$suffix"; done
+          node scripts/set-release-version.mjs "$version"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Publish development package
+        env: { GH_TOKEN: "${{ github.token }}", VERSION: "${{ steps.version.outputs.version }}" }
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add burrow.mod.json package.json
+          git diff --cached --quiet || git commit -m "Release Reference Mod $VERSION"
+          git push origin HEAD:main
+          git tag -a "$VERSION" -m "Burrow Reference Mod $VERSION"
+          git push origin "$VERSION"
+          gh release create "$VERSION" --title "Burrow Reference Mod $VERSION (development)" --notes "NightShaman development reference package $VERSION."
