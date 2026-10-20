@@ -1,0 +1,26 @@
+{
+  "id": "burrow-reference-mod",
+  "name": "Burrow Reference Mod",
+  "version": "2026.10.20",
+  "server": "server/index.mjs",
+  "ui": {
+    "control": "ui/control.js",
+    "settings": "ui/settings.js"
+  },
+  "contributions": {
+    "settings": [
+      {
+        "id": "configuration",
+        "navigation": {
+          "title": "Reference Mod",
+          "description": "A deliberately boring example of the public Burrow mod contract."
+        },
+        "primary": {
+          "title": "Reference Mod",
+          "description": "Configure the greeting and an optional write-only example secret.",
+          "capability": "settingsUi"
+        }
+      }
+    ]
+  }
+}

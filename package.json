@@ -1,0 +1,14 @@
+{
+  "name": "burrow-reference-mod",
+  "version": "2026.10.20",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "node --check server/index.mjs && node --check ui/control.js && node --check ui/settings.js",
+    "test": "node --test test/*.test.mjs",
+    "test:core": "node --test test/core-contract.test.mjs"
+  }
+}
