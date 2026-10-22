@@ -1,3 +1,8 @@
+import { randomUUID } from 'node:crypto';
+
+const IMAGE_REQUEST_SETTING = 'image-request';
+const TERMINAL_IMAGE_STATUSES = ['succeeded', 'failed', 'interrupted'];
+
 const DEFAULT_GREETING = 'Hello from the Burrow Reference Mod.';
 const MAX_GREETING_LENGTH = 160;
 const MAX_SECRET_LENGTH = 4096;
@@ -34,7 +39,64 @@ function response(status, body) {
   return { status, headers: { 'cache-control': 'no-store' }, body };
 }
 
+// Deliberately one retained request: persist intent before paid dispatch so an
+// ambiguous RPC/storage failure can be retried with exactly the same Core key.
+function registerImageExample(context) {
+  let submitting = false;
+  const savedRequest = () => context.settings.get(IMAGE_REQUEST_SETTING, null);
+  const publicErrors = new Set(['operator_authentication_required', 'image_request_invalid', 'image_submission_busy', 'image_retry_unavailable', 'image_request_pending', 'image_unavailable']);
+  const failure = (error) => response(publicErrors.has(error?.message) ? error.statusCode : 503, {
+    ok: false,
+    error: publicErrors.has(error?.message) ? error.message : 'image_capability_failed',
+  });
+  context.api.get('/images/status', async (request) => {
+    try {
+      requireOperator(request);
+      const availability = await context.forge.images.status();
+      const saved = await savedRequest();
+      return response(200, { ok: true, ...availability, jobId: saved?.jobId || null, retryPending: !!saved && !saved.jobId });
+    } catch (error) { return failure(error); }
+  });
+  context.api.get('/images/job', async (request) => {
+    try {
+      requireOperator(request);
+      const saved = await savedRequest();
+      return response(200, { ok: true, job: saved?.jobId ? await context.forge.jobs.read(saved.jobId) : null });
+    } catch (error) { return failure(error); }
+  });
+  context.api.post('/images', async (request) => {
+    let acquired = false;
+    try {
+      requireOperator(request);
+      const body = request.body;
+      if (!plainObject(body) || Object.keys(body).some((key) => !['prompt', 'confirmCost'].includes(key)) || body.confirmCost !== true ||
+          (body.prompt !== undefined && (typeof body.prompt !== 'string' || !body.prompt.trim() || body.prompt.length > 4000))) {
+        throw Object.assign(new Error('image_request_invalid'), { statusCode: 400 });
+      }
+      if (submitting) throw Object.assign(new Error('image_submission_busy'), { statusCode: 409 });
+      submitting = true; acquired = true;
+      let saved = await savedRequest();
+      if (body.prompt === undefined) {
+        if (!saved || saved.jobId) throw Object.assign(new Error('image_retry_unavailable'), { statusCode: 409 });
+      } else {
+        if (saved && (!saved.jobId || !TERMINAL_IMAGE_STATUSES.includes((await context.forge.jobs.read(saved.jobId)).status))) {
+          throw Object.assign(new Error('image_request_pending'), { statusCode: 409 });
+        }
+        if (!(await context.forge.images.status()).available) throw Object.assign(new Error('image_unavailable'), { statusCode: 409 });
+        saved = { prompt: body.prompt.trim(), idempotencyKey: randomUUID(), jobId: null };
+        await context.settings.set(IMAGE_REQUEST_SETTING, saved);
+      }
+      const result = await context.forge.images.create({ prompt: saved.prompt, idempotencyKey: saved.idempotencyKey });
+      await context.settings.set(IMAGE_REQUEST_SETTING, { idempotencyKey: saved.idempotencyKey, jobId: result.job.id });
+      // Accepted is not completed. Read the durable job in a later route call.
+      return response(202, { ok: true, job: result.job, replayed: result.replayed });
+    } catch (error) { return failure(error); }
+    finally { if (acquired) submitting = false; }
+  });
+}
+
 export async function activate(context) {
+  registerImageExample(context);
   context.api.get('/status', async () => response(200, {
     ok: true,
     greeting: await context.settings.get('greeting', DEFAULT_GREETING),

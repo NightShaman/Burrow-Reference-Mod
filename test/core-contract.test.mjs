@@ -5,5 +5,68 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const coreRoot = path.resolve(process.env.BURROW_CORE_ROOT || path.join(root, '..', 'Burrow-Backend'));
-async function memoryStore() { const settings = new Map(); const secrets = new Map(); return { get: async (n,f=null)=>settings.has(n)?settings.get(n):f, set: async(n,v)=>(settings.set(n,v),v), delete: async n=>settings.delete(n), getSecret: async n=>secrets.get(n)??null, setSecret: async(n,v)=>(v?secrets.set(n,String(v)):secrets.delete(n),true), clearSecret: async n=>secrets.delete(n), hasSecret: async n=>secrets.has(n), close: async()=>{} }; }
-test('current Burrow Core discovers and hosts the packaged reference mod', async (t) => { const [{ discoverMods }, { startModHost }] = await Promise.all([import(pathToFileURL(path.join(coreRoot,'src/mod-runtime.mjs'))), import(pathToFileURL(path.join(coreRoot,'src/mod-host.mjs')))]); const runtimeRoot=await fs.mkdtemp('/tmp/burrow-reference-contract-'); const modsRoot=path.join(runtimeRoot,'mods'); await fs.mkdir(modsRoot,{recursive:true}); await fs.cp(root,path.join(modsRoot,'burrow-reference-mod'),{recursive:true,filter:(source)=>path.basename(source)!=='.git'}); t.after(()=>fs.rm(runtimeRoot,{recursive:true,force:true})); const [mod]=await discoverMods({runtimeRoot,logger:{warn(){}}}); assert.equal(mod.id,'burrow-reference-mod'); assert.notEqual(mod.status,'failed',mod.error); assert.deepEqual(Object.keys(mod.ui).sort(),['control','settings']); const host=startModHost({mod,store:await memoryStore(),logger:{debug(){},info(){},warn(){},error(){}}}); t.after(()=>host.close()); const activation=await host.activated; assert.deepEqual(activation.map(({method,path:routePath})=>`${method} ${routePath}`),['GET /status','PUT /configuration']); assert.deepEqual(activation.tools.map(({name,availability})=>({name,availability})),[{name:'reference_greet',availability:'grant-required'}]); assert.equal((await host.invoke('route-1',{auth:{enabled:false,authenticated:false},body:null,query:{},params:{},headers:{},method:'GET',path:'/status'})).body.ok,true); assert.match((await host.invokeTool('reference_greet',{name:'Core'},{agentId:'fixture',sessionId:'session'})).message,/Core$/); });
+async function memoryStore() {
+  const settings = new Map(); const secrets = new Map();
+  return {
+    get: async (n, f = null) => settings.has(n) ? settings.get(n) : f,
+    set: async (n, v) => (settings.set(n, v), v), delete: async n => settings.delete(n),
+    getSecret: async n => secrets.get(n) ?? null,
+    setSecret: async (n, v) => (v ? secrets.set(n, String(v)) : secrets.delete(n), true),
+    clearSecret: async n => secrets.delete(n), hasSecret: async n => secrets.has(n), close: async () => {},
+  };
+}
+test('current Core discovers, hosts and resumes ordinary-mod Forge image RPCs', async (t) => {
+  const [{ discoverMods }, { startModHost }, { createModCapabilities }] = await Promise.all(
+    ['mod-runtime.mjs', 'mod-host.mjs', 'mod-capabilities.mjs'].map(name => import(pathToFileURL(path.join(coreRoot, 'src', name))))
+  );
+  const runtimeRoot = await fs.mkdtemp('/tmp/burrow-reference-contract-');
+  const modsRoot = path.join(runtimeRoot, 'mods');
+  await fs.mkdir(modsRoot, { recursive: true });
+  await fs.cp(root, path.join(modsRoot, 'burrow-reference-mod'), { recursive: true, filter: source => path.basename(source) !== '.git' });
+  t.after(() => fs.rm(runtimeRoot, { recursive: true, force: true }));
+  const [mod] = await discoverMods({ runtimeRoot, logger: { warn() {} } });
+  assert.equal(mod.id, 'burrow-reference-mod'); assert.notEqual(mod.status, 'failed', mod.error);
+  assert.notEqual(mod.system, true); assert.deepEqual(Object.keys(mod.ui).sort(), ['control', 'settings']);
+  const store = await memoryStore();
+  let job; const dispatches = [];
+  // In-memory Forge boundary: real Core projection/ownership and host-child RPC,
+  // no provider call, credentials, PostgreSQL dependency or paid generation.
+  const forge = {
+    catalog: async () => ({ models: [{ connectionId: 'private-connection', modelId: 'private-model', kind: 'image', available: true }] }),
+    selections: async () => ({ image: { connectionId: 'private-connection', modelId: 'private-model' } }),
+    create: async (input, options) => {
+      dispatches.push({ input, options });
+      const replayed = !!job;
+      job ||= { id: 'image-1', kind: 'image', status: 'queued', modOwnerId: options.ownerModId, idempotencyKey: input.idempotencyKey, prompt: input.prompt, modelId: 'private-model', connectionId: 'private-connection', artifacts: [], error: null };
+      return { job, replayed };
+    },
+    get: async id => id === job?.id ? job : null,
+    public: value => ({ ...value, artifacts: value.artifacts.map(a => ({ ...a, previewUrl: `/api/forge/jobs/${value.id}/artifacts/${a.id}`, downloadUrl: 'private-download', storageReference: 'private-storage' })) }),
+  };
+  const capabilities = createModCapabilities({ ownerModId: mod.id, resolveAgentRuntime: async () => ({}), stores: { agents: {}, models: {}, scheduledJobs: {}, conversations: {}, forge } });
+  const start = () => startModHost({ mod, store, capabilities, logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  let host = start(); t.after(() => host.close());
+  const activation = await host.activated;
+  assert.deepEqual(activation.map(({ method, path }) => `${method} ${path}`), ['GET /images/status', 'GET /images/job', 'POST /images', 'GET /status', 'PUT /configuration']);
+  assert.deepEqual(activation.tools.map(({ name, availability }) => ({ name, availability })), [{ name: 'reference_greet', availability: 'grant-required' }]);
+  const invoke = (method, path, body = null) => host.invoke(activation.find(route => route.method === method && route.path === path).routeId, { auth: { enabled: false, authenticated: false }, body, query: {}, params: {}, headers: {}, method, path });
+  assert.equal((await invoke('GET', '/status')).body.ok, true);
+  assert.match((await host.invokeTool('reference_greet', { name: 'Core' }, { agentId: 'fixture', sessionId: 'session' })).message, /Core$/);
+  assert.equal((await invoke('GET', '/images/status')).body.available, true);
+  const receipt = await invoke('POST', '/images', { prompt: 'A small burrow', confirmCost: true });
+  assert.equal(receipt.status, 202); assert.equal(receipt.body.job.status, 'queued');
+  assert.equal(dispatches.length, 1);
+  assert.deepEqual(Object.keys(dispatches[0].input).sort(), ['idempotencyKey', 'mode', 'prompt']);
+  assert.match(dispatches[0].input.idempotencyKey, /^mod:burrow-reference-mod:/);
+  assert.deepEqual(dispatches[0].options, { ownerModId: mod.id });
+  await host.close(); host = start(); await host.activated;
+  assert.equal((await invoke('GET', '/images/status')).body.jobId, receipt.body.job.id);
+  job.status = 'succeeded'; job.artifacts = [{ id: 'artifact-1', kind: 'image', mimeType: 'image/png', name: 'preview.png', sizeBytes: 10 }];
+  const read = await invoke('GET', '/images/job');
+  assert.equal(read.body.job.status, 'succeeded');
+  assert.equal(read.body.job.artifacts[0].previewUrl, '/api/forge/jobs/image-1/artifacts/artifact-1');
+  assert.doesNotMatch(JSON.stringify(read.body), /private-|prompt|connectionId|modelId|downloadUrl|storageReference/);
+  job.modOwnerId = 'foreign-mod';
+  const foreign = await invoke('GET', '/images/job');
+  assert.equal(foreign.status, 503); assert.equal(foreign.body.error, 'image_capability_failed');
+});
