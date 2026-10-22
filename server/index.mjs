@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 
 const IMAGE_REQUEST_SETTING = 'image-request';
 const TERMINAL_IMAGE_STATUSES = ['succeeded', 'failed', 'interrupted'];
+const AGENT_TURN_ENABLED_SETTING = 'agent-turn-enabled';
+const AGENT_TURN_REQUEST_SETTING = 'agent-turn-request';
 
 const DEFAULT_GREETING = 'Hello from the Burrow Reference Mod.';
 const MAX_GREETING_LENGTH = 160;
@@ -95,8 +97,65 @@ function registerImageExample(context) {
   });
 }
 
+// Narrow operator-only scaffold: disabled by default, one retained logical turn,
+// no activation/timer/tool dispatch, and no direct provider integration.
+function registerAgentTurnExample(context) {
+  let submitting = false;
+  const savedRequest = () => context.settings.get(AGENT_TURN_REQUEST_SETTING, null);
+  const publicErrors = new Set(['operator_authentication_required', 'agent_turn_invalid', 'agent_turn_disabled', 'agent_turn_busy', 'agent_turn_pending', 'agent_turn_retry_unavailable', 'agent_not_found', 'agent_disabled', 'mod_external_turn_idempotency_conflict', 'mod_external_turn_not_found']);
+  const failTurn = (error) => response(publicErrors.has(error?.message) ? Number(error.statusCode) || 409 : 503, { ok: false, error: publicErrors.has(error?.message) ? error.message : 'agent_turn_capability_failed' });
+  context.api.get('/agent-turn/status', async (request) => {
+    try {
+      requireOperator(request);
+      return response(200, { ok: true, enabled: await context.settings.get(AGENT_TURN_ENABLED_SETTING, false) === true, agents: await context.agents.list(), retained: !!(await savedRequest()) });
+    } catch (error) { return failTurn(error); }
+  });
+  context.api.put('/agent-turn/configuration', async (request) => {
+    try {
+      requireOperator(request);
+      if (!plainObject(request.body) || Object.keys(request.body).some(key => key !== 'enabled') || typeof request.body.enabled !== 'boolean') throw Object.assign(Error('agent_turn_invalid'), { statusCode: 400 });
+      await context.settings.set(AGENT_TURN_ENABLED_SETTING, request.body.enabled);
+      return response(200, { ok: true, enabled: request.body.enabled });
+    } catch (error) { return failTurn(error); }
+  });
+  context.api.post('/agent-turn', async (request) => {
+    let acquired = false;
+    try {
+      requireOperator(request);
+      if (await context.settings.get(AGENT_TURN_ENABLED_SETTING, false) !== true) throw Object.assign(Error('agent_turn_disabled'), { statusCode: 403 });
+      const body = request.body;
+      if (!plainObject(body) || Object.keys(body).some(key => !['agentId', 'sessionId', 'message', 'confirmDispatch'].includes(key)) || body.confirmDispatch !== true) throw Object.assign(Error('agent_turn_invalid'), { statusCode: 400 });
+      if (submitting) throw Object.assign(Error('agent_turn_busy'), { statusCode: 409 });
+      submitting = true; acquired = true;
+      let saved = await savedRequest();
+      if (body.message === undefined) {
+        if (!saved || saved.turnId) throw Object.assign(Error('agent_turn_retry_unavailable'), { statusCode: 409 });
+      } else {
+        for (const [name, max] of [['agentId', 96], ['sessionId', 128], ['message', 100_000]]) {
+          if (typeof body[name] !== 'string' || !body[name].trim() || body[name].length > max) throw Object.assign(Error('agent_turn_invalid'), { statusCode: 400 });
+        }
+        if (saved && (!saved.turnId || !TERMINAL_IMAGE_STATUSES.includes((await context.agents.turns.read(saved.turnId)).status))) throw Object.assign(Error('agent_turn_pending'), { statusCode: 409 });
+        saved = { agentId: body.agentId.trim(), sessionId: body.sessionId.trim(), message: body.message, idempotencyKey: randomUUID(), turnId: null };
+        await context.settings.set(AGENT_TURN_REQUEST_SETTING, saved);
+      }
+      const accepted = await context.agents.turns.submit({ agentId: saved.agentId, sessionId: saved.sessionId, message: saved.message, idempotencyKey: saved.idempotencyKey });
+      await context.settings.set(AGENT_TURN_REQUEST_SETTING, { agentId: saved.agentId, sessionId: saved.sessionId, idempotencyKey: saved.idempotencyKey, turnId: accepted.turn.id });
+      return response(202, { ok: true, turn: accepted.turn, replayed: accepted.replayed });
+    } catch (error) { return failTurn(error); }
+    finally { if (acquired) submitting = false; }
+  });
+  context.api.get('/agent-turn', async (request) => {
+    try {
+      requireOperator(request);
+      const saved = await savedRequest();
+      return response(200, { ok: true, retryPending: !!saved && !saved.turnId, turn: saved?.turnId ? await context.agents.turns.read(saved.turnId) : null });
+    } catch (error) { return failTurn(error); }
+  });
+}
+
 export async function activate(context) {
   registerImageExample(context);
+  registerAgentTurnExample(context);
   context.api.get('/status', async () => response(200, {
     ok: true,
     greeting: await context.settings.get('greeting', DEFAULT_GREETING),

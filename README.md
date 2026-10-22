@@ -2,7 +2,7 @@
 
 Burrow Reference Mod is the deliberately boring, public reference implementation of Burrow's ordinary third-party mod contract.
 
-It demonstrates a validated manifest, `activate(context)` and cleanup, JSON routes, namespaced settings and encrypted write-only secrets, a grant-required agent tool, Control and Settings UI, an opt-in asynchronous Forge image example, and an actual current-Core integration test. It uses no private Kingdom code, privileged system capabilities, framework, or generated build source.
+It demonstrates a validated manifest, `activate(context)` and cleanup, JSON routes, namespaced settings and encrypted write-only secrets, a grant-required agent tool, Control and Settings UI, an opt-in asynchronous Forge image example, a disabled operator-triggered external agent-turn scaffold, and an actual current-Core integration test. It uses no private Kingdom code, privileged system capabilities, framework, or generated build source.
 
 ## Install
 
@@ -33,6 +33,24 @@ git diff --check
 ```
 
 The canonical author contract lives in the Burrow documentation under **Develop → Third-party mod contract**.
+
+## Ordinary-mod external agent-turn scaffold
+
+The server also registers a deliberately narrow operator control for `context.agents.turns`. It starts disabled, has no automatic UI action, timer, activation dispatch, agent tool, provider selection, or direct model/provider call.
+
+| Method/path | Request | Result |
+| --- | --- | --- |
+| `GET /agent-turn/status` | None | Enabled state, bounded agent picker, and retained-request indicator |
+| `PUT /agent-turn/configuration` | `{ enabled: boolean }` | Explicit operator enable/disable control |
+| `POST /agent-turn` | `{ agentId, sessionId, message, confirmDispatch: true }` | `202` durable acceptance receipt |
+| `POST /agent-turn` | `{ confirmDispatch: true }` | Retry an ambiguously failed saved submission with the same key |
+| `GET /agent-turn` | None | Later poll of the retained turn ID |
+
+Choose a registered `enabled: true` agent from status. Use an explicit durable session ID representing the external conversation. The example persists one prompt plus a server-generated stable idempotency key before submission, then retains the accepted turn ID and drops its local prompt copy. A `202` response means accepted, not complete: the route never awaits agent/model completion. Poll later. Core runs the ordinary agent turn, scopes keys/turn IDs to this installed mod, and returns only bounded public status/result fields.
+
+If dispatch or receipt persistence fails ambiguously, retry without a new message; the retained key prevents duplicate work. Exact replay returns the same turn. A Core restart can mark queued/running work `interrupted`; replaying the same key still returns that interrupted receipt. A deliberate new attempt needs a new logical request/key. There is no cancellation API. Same-mod ownership is not end-user authorization; a real transport must authenticate and authorize its own sender/chat records and define message-retention policy. This teaching scaffold stores pending prompt text in ordinary settings, not encrypted secrets.
+
+Current-Core tests use its real capability service and external-turn dispatcher with an in-memory receipt store and fake executor. They do not contact a model provider or dispatch paid work.
 
 ## Ordinary-mod Forge image example
 
