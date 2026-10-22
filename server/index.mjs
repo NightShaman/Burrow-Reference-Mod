@@ -4,6 +4,7 @@ const IMAGE_REQUEST_SETTING = 'image-request';
 const TERMINAL_IMAGE_STATUSES = ['succeeded', 'failed', 'interrupted'];
 const AGENT_TURN_ENABLED_SETTING = 'agent-turn-enabled';
 const AGENT_TURN_REQUEST_SETTING = 'agent-turn-request';
+const GENERATION_REQUEST_SETTING = 'generation-request';
 
 const DEFAULT_GREETING = 'Hello from the Burrow Reference Mod.';
 const MAX_GREETING_LENGTH = 160;
@@ -153,9 +154,37 @@ function registerAgentTurnExample(context) {
   });
 }
 
+function registerGenerationExample(context) {
+  const savedRequest = () => context.settings.get(GENERATION_REQUEST_SETTING, null);
+  const failGeneration = error => response(Number(error?.statusCode) || 503, { ok: false, error: Number(error?.statusCode) ? error.message : 'generation_capability_failed' });
+  context.api.post('/generations', async request => {
+    try {
+      requireOperator(request);
+      const body = request.body;
+      if (!plainObject(body) || Object.keys(body).some(key => !['connectionId','model','prompt','maxTokens','requestId','confirmCost'].includes(key)) || body.confirmCost !== true) throw Object.assign(Error('generation_request_invalid'), { statusCode: 400 });
+      for (const [name,max] of [['connectionId',128],['model',256],['prompt',100_000],['requestId',128]]) if (typeof body[name] !== 'string' || !body[name].trim() || body[name].length > max) throw Object.assign(Error('generation_request_invalid'), { statusCode: 400 });
+      if (body.maxTokens !== undefined && (!Number.isSafeInteger(body.maxTokens) || body.maxTokens < 1)) throw Object.assign(Error('generation_request_invalid'), { statusCode: 400 });
+      const retained = await savedRequest();
+      const idempotencyKey = `reference-generation:${body.requestId.trim()}`;
+      if (retained && retained.idempotencyKey !== idempotencyKey) {
+        const current = await context.models.generations.read(retained.jobId);
+        if (!TERMINAL_IMAGE_STATUSES.includes(current.status)) throw Object.assign(Error('generation_request_pending'), { statusCode: 409 });
+      }
+      const accepted = await context.models.generations.submit({ connectionId: body.connectionId.trim(), model: body.model.trim(), prompt: body.prompt, ...(body.maxTokens === undefined ? {} : { maxTokens: body.maxTokens }), idempotencyKey });
+      await context.settings.set(GENERATION_REQUEST_SETTING, { idempotencyKey, jobId: accepted.job.id });
+      return response(202, { ok: true, job: accepted.job, replayed: accepted.replayed });
+    } catch (error) { return failGeneration(error); }
+  });
+  context.api.get('/generations/job', async request => {
+    try { requireOperator(request); const saved = await savedRequest(); return response(200, { ok: true, job: saved?.jobId ? await context.models.generations.read(saved.jobId) : null }); }
+    catch (error) { return failGeneration(error); }
+  });
+}
+
 export async function activate(context) {
   registerImageExample(context);
   registerAgentTurnExample(context);
+  registerGenerationExample(context);
   context.api.get('/status', async () => response(200, {
     ok: true,
     greeting: await context.settings.get('greeting', DEFAULT_GREETING),

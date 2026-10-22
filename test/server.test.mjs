@@ -19,7 +19,7 @@ function fixture() {
   return { context, routes, tools, settings, secrets, logs };
 }
 const request = (body, auth = { enabled: true, authenticated: true }) => ({ body, auth, query: {}, params: {}, headers: {}, method: 'PUT', path: '/configuration' });
-test('activation registers the public route and grant-required tool contract', async () => { const f = fixture(); f.context.forge = { images: { status: async () => ({ available: false }) }, jobs: { read: async () => null } }; f.context.agents.turns = { submit: async () => { throw Error('not-called'); }, read: async () => null }; const cleanup = await activate(f.context); assert.deepEqual([...f.routes.keys()], ['GET /images/status', 'GET /images/job', 'POST /images', 'GET /agent-turn/status', 'PUT /agent-turn/configuration', 'POST /agent-turn', 'GET /agent-turn', 'GET /status', 'PUT /configuration']); assert.equal(f.tools.length, 1); assert.equal(f.tools[0].name, 'reference_greet'); assert.equal(f.tools[0].availability, undefined); assert.equal(f.tools[0].inputSchema.additionalProperties, false); assert.equal(typeof cleanup, 'function'); cleanup(); assert.deepEqual(f.logs.map((entry) => entry[1]), ['Burrow Reference Mod activated', 'Burrow Reference Mod stopped']); });
+test('activation registers the public route and grant-required tool contract', async () => { const f = fixture(); f.context.forge = { images: { status: async () => ({ available: false }) }, jobs: { read: async () => null } }; f.context.agents.turns = { submit: async () => { throw Error('not-called'); }, read: async () => null }; f.context.models = { generations: { submit: async () => { throw Error('not-called'); }, read: async () => null } }; const cleanup = await activate(f.context); assert.deepEqual([...f.routes.keys()], ['GET /images/status', 'GET /images/job', 'POST /images', 'GET /agent-turn/status', 'PUT /agent-turn/configuration', 'POST /agent-turn', 'GET /agent-turn', 'POST /generations', 'GET /generations/job', 'GET /status', 'PUT /configuration']); assert.equal(f.tools.length, 1); assert.equal(f.tools[0].name, 'reference_greet'); assert.equal(f.tools[0].availability, undefined); assert.equal(f.tools[0].inputSchema.additionalProperties, false); assert.equal(typeof cleanup, 'function'); cleanup(); assert.deepEqual(f.logs.map((entry) => entry[1]), ['Burrow Reference Mod activated', 'Burrow Reference Mod stopped']); });
 test('status returns public configuration without exposing the secret', async () => { const f = fixture(); await activate(f.context); f.secrets.set('example-secret', 'never-return-this'); const result = await f.routes.get('GET /status')({ auth: { enabled: false, authenticated: false } }); assert.equal(result.status, 200); assert.deepEqual(result.body, { ok: true, greeting: referenceContract.DEFAULT_GREETING, secretConfigured: true }); assert.doesNotMatch(JSON.stringify(result), /never-return-this/); });
 test('configuration persists namespaced settings and write-only secret state', async () => { const f = fixture(); await activate(f.context); const save = await f.routes.get('PUT /configuration')(request({ greeting: '  Welcome.  ', secret: 'private-example' })); assert.deepEqual(save.body, { ok: true, greeting: 'Welcome.', secretConfigured: true }); assert.equal(f.settings.get('greeting'), 'Welcome.'); assert.equal(f.secrets.get('example-secret'), 'private-example'); assert.doesNotMatch(JSON.stringify(save), /private-example/); const clear = await f.routes.get('PUT /configuration')(request({ greeting: 'Welcome.', secret: '' })); assert.equal(clear.body.secretConfigured, false); assert.equal(f.secrets.has('example-secret'), false); });
 test('configuration uses trusted auth context and rejects malformed input', async () => { const f = fixture(); await activate(f.context); const denied = await f.routes.get('PUT /configuration')(request({ greeting: 'Nope' }, { enabled: true, authenticated: false })); assert.equal(denied.status, 401); for (const body of [null, {}, { greeting: '' }, { greeting: 'ok', surprise: true }, { greeting: 'x'.repeat(161) }]) assert.equal((await f.routes.get('PUT /configuration')(request(body))).status, 400); assert.equal((await f.routes.get('PUT /configuration')(request({ greeting: 'Trusted network' }, { enabled: false, authenticated: false }))).status, 200); });
@@ -152,4 +152,22 @@ test('image reads enforce trusted auth and sanitize upstream errors even with st
   const result = await f.routes.get('GET /images/status')(request());
   assert.equal(result.status, 503); assert.equal(result.body.error, 'image_capability_failed');
   assert.equal(result.headers['cache-control'], 'no-store'); assert.doesNotMatch(JSON.stringify(result), /private-provider/);
+});
+
+
+test('durable generation example returns acceptance and polls the retained owned job', async () => {
+  const f = fixture(); const calls = []; const jobs = new Map();
+  f.context.models = { generations: {
+    submit: async input => { calls.push(input); const existing = jobs.get(input.idempotencyKey); const job = existing || { id: 'generation-1', status: 'queued', text: null, error: null }; jobs.set(input.idempotencyKey, job); return { job, replayed: !!existing }; },
+    read: async id => [...jobs.values()].find(job => job.id === id),
+  } };
+  await activate(f.context);
+  const input = { connectionId: 'local', model: 'slow', prompt: 'Tell a story.', requestId: 'story-1', confirmCost: true };
+  assert.equal((await f.routes.get('POST /generations')(request({ ...input, confirmCost: false }))).status, 400);
+  const accepted = await f.routes.get('POST /generations')(request(input));
+  assert.equal(accepted.status, 202); assert.equal(accepted.body.job.status, 'queued');
+  assert.deepEqual(calls[0], { connectionId: 'local', model: 'slow', prompt: 'Tell a story.', idempotencyKey: 'reference-generation:story-1' });
+  jobs.get('reference-generation:story-1').status = 'succeeded'; jobs.get('reference-generation:story-1').text = 'Done.';
+  assert.equal((await f.routes.get('GET /generations/job')(request())).body.job.text, 'Done.');
+  assert.equal((await f.routes.get('POST /generations')(request(input))).body.replayed, true);
 });

@@ -16,8 +16,8 @@ async function memoryStore() {
   };
 }
 test('current Core discovers, hosts and resumes ordinary-mod Forge and external-turn RPCs', async (t) => {
-  const [{ discoverMods }, { startModHost }, { createModCapabilities }, { createModExternalTurnDispatcher }] = await Promise.all(
-    ['mod-runtime.mjs', 'mod-host.mjs', 'mod-capabilities.mjs', 'mod-external-turns.mjs'].map(name => import(pathToFileURL(path.join(coreRoot, 'src', name))))
+  const [{ discoverMods }, { startModHost }, { createModCapabilities }, { createModExternalTurnDispatcher }, { createModGenerationDispatcher }] = await Promise.all(
+    ['mod-runtime.mjs', 'mod-host.mjs', 'mod-capabilities.mjs', 'mod-external-turns.mjs', 'mod-generations.mjs'].map(name => import(pathToFileURL(path.join(coreRoot, 'src', name))))
   );
   const runtimeRoot = await fs.mkdtemp('/tmp/burrow-reference-contract-');
   const modsRoot = path.join(runtimeRoot, 'mods');
@@ -55,11 +55,25 @@ test('current Core discovers, hosts and resumes ordinary-mod Forge and external-
   const turnExecution = new Promise(resolve => { releaseTurn = resolve; }); let turnInput;
   const externalTurnDispatcher = createModExternalTurnDispatcher({ store: turnStore, stores: { agents }, rootDir: '/fixture', resolveAgentRuntime: async id => ({ agentId: id }), createRunId: () => 'external-run', executeTurn: async input => { turnInput = input; return turnExecution; } });
   t.after(() => externalTurnDispatcher.close());
-  const capabilities = createModCapabilities({ ownerModId: mod.id, resolveAgentRuntime: async id => ({ agentId: id }), externalTurnDispatcher, stores: { agents, models: {}, scheduledJobs: {}, conversations: {}, forge } });
+  const generationRows = new Map(); let generationSequence = 0;
+  const generationStore = {
+    async create(input) {
+      const existing = [...generationRows.values()].find(row => row.ownerModId === input.ownerModId && row.idempotencyKey === input.idempotencyKey);
+      if (existing) return { job: { ...existing }, replayed: true };
+      const row = { id: `generation-${++generationSequence}`, ...input, status: 'queued', text: null, error: null, createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z', startedAt: null, completedAt: null };
+      generationRows.set(row.id, row); return { job: { ...row }, replayed: false };
+    },
+    async getOwned(owner, id) { const row = generationRows.get(id); return row?.ownerModId === owner ? { ...row } : null; },
+    async markRunning(id) { const row = generationRows.get(id); if (row?.status !== 'queued') return null; Object.assign(row, { status: 'running', startedAt: '2026-10-22T00:00:01.000Z', updatedAt: '2026-10-22T00:00:01.000Z' }); return { ...row }; },
+    async complete(id, patch) { const row = generationRows.get(id); if (!row || !['queued', 'running'].includes(row.status)) return null; Object.assign(row, patch, { completedAt: '2026-10-22T00:00:02.000Z', updatedAt: '2026-10-22T00:00:02.000Z' }); return { ...row }; },
+  };
+  const generationDispatcher = createModGenerationDispatcher({ store: generationStore, generateText: async () => ({ text: 'Durable current-Core result.' }) });
+  t.after(() => generationDispatcher.close());
+  const capabilities = createModCapabilities({ ownerModId: mod.id, resolveAgentRuntime: async id => ({ agentId: id }), externalTurnDispatcher, generationDispatcher, stores: { agents, models: {}, scheduledJobs: {}, conversations: {}, forge } });
   const start = () => startModHost({ mod, store, capabilities, logger: { debug() {}, info() {}, warn() {}, error() {} } });
   let host = start(); t.after(() => host.close());
   const activation = await host.activated;
-  assert.deepEqual(activation.map(({ method, path }) => `${method} ${path}`), ['GET /images/status', 'GET /images/job', 'POST /images', 'GET /agent-turn/status', 'PUT /agent-turn/configuration', 'POST /agent-turn', 'GET /agent-turn', 'GET /status', 'PUT /configuration']);
+  assert.deepEqual(activation.map(({ method, path }) => `${method} ${path}`), ['GET /images/status', 'GET /images/job', 'POST /images', 'GET /agent-turn/status', 'PUT /agent-turn/configuration', 'POST /agent-turn', 'GET /agent-turn', 'POST /generations', 'GET /generations/job', 'GET /status', 'PUT /configuration']);
   assert.deepEqual(activation.tools.map(({ name, availability }) => ({ name, availability })), [{ name: 'reference_greet', availability: 'grant-required' }]);
   const invoke = (method, path, body = null) => host.invoke(activation.find(route => route.method === method && route.path === path).routeId, { auth: { enabled: false, authenticated: false }, body, query: {}, params: {}, headers: {}, method, path });
   assert.equal((await invoke('GET', '/status')).body.ok, true);
@@ -73,6 +87,12 @@ test('current Core discovers, hosts and resumes ordinary-mod Forge and external-
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(turnInput.body.message, externalInput.message); assert.equal(turnInput.body.sessionId, externalInput.sessionId);
   assert.equal((await invoke('GET', '/agent-turn')).body.turn.status, 'running');
+  const generation = await invoke('POST', '/generations', { connectionId: 'fixture-connection', model: 'fixture-model', prompt: 'Generate slowly.', requestId: 'slow-1', confirmCost: true });
+  assert.equal(generation.status, 202); assert.equal(generation.body.job.status, 'queued');
+  await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
+  const generated = await invoke('GET', '/generations/job');
+  assert.equal(generated.body.job.status, 'succeeded'); assert.equal(generated.body.job.text, 'Durable current-Core result.');
+  assert.doesNotMatch(JSON.stringify(generated), /Generate slowly|idempotencyKey|ownerModId/);
   releaseTurn({ ok: true, answerText: 'transport answer', decision: 'answer', blockers: [] });
   await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
   const completedTurn = await invoke('GET', '/agent-turn');
